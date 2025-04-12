@@ -2,7 +2,7 @@
 
 set -e
 
-export XILINX_VITIS="/opt/Xilinx/2024.2/Vitis"
+export XILINX_VITIS=""
 OSDIST=`grep '^ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
 VERSION=`grep '^VERSION_ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
 MAJOR=${VERSION%.*}
@@ -12,8 +12,10 @@ CMAKE=/usr/bin/cmake
 CMAKE_MAJOR_VERSION=`/usr/bin/cmake --version | head -n 1 | awk '{print $3}' |awk -F. '{print $1}'`
 CPU=`uname -m`
 
-export PKG_CONFIG_PATH="/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig"
-export PATH="/usr/local/bin:${PATH}"
+if [ "x${XILINX_VITIS}" == "x" ] ; then
+  echo "`basename $0`: XILINX_VITIS is not set. Please set it to a valid path."
+  exit 1
+fi
 
 if [[ $CMAKE_MAJOR_VERSION != 3 ]]; then
     if [[ $OSDIST == "centos" ]] || [[ $OSDIST == "amzn" ]] || [[ $OSDIST == "rhel" ]] || [[ $OSDIST == "fedora" ]] || [[ $OSDIST == "mariner" ]] || [[ $OSDIST == "almalinux" ]]; then
