@@ -1,0 +1,9 @@
+*.o
+*~
+*.log
+build/Debug*
+build/Release*
+build/WDebug*
+build/WRelease*
+__pycache__
+compile_commands.json

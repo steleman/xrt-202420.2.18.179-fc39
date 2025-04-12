@@ -1,0 +1,2903 @@
+--- build/build.sh	2025-04-10 18:28:24.001438162 -0400
++++ build/build.sh	2025-04-11 22:18:51.976944747 -0400
+@@ -2,13 +2,14 @@
+ 
+ set -e
+ 
++export XILINX_VITIS="/opt/Xilinx/2024.2/Vitis"
+ OSDIST=`grep '^ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+ VERSION=`grep '^VERSION_ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+ MAJOR=${VERSION%.*}
+ BUILDDIR=$(readlink -f $(dirname ${BASH_SOURCE[0]}))
+-CORE=`grep -c ^processor /proc/cpuinfo`
+-CMAKE=cmake
+-CMAKE_MAJOR_VERSION=`cmake --version | head -n 1 | awk '{print $3}' |awk -F. '{print $1}'`
++CORE=4
++CMAKE=/usr/bin/cmake
++CMAKE_MAJOR_VERSION=`/usr/bin/cmake --version | head -n 1 | awk '{print $3}' |awk -F. '{print $1}'`
+ CPU=`uname -m`
+ 
+ if [[ $CMAKE_MAJOR_VERSION != 3 ]]; then
+@@ -36,9 +37,9 @@
+     fi
+ fi
+ 
+-# Use GCC 9 on CentOS 8, RHEL 8, AlmaLinux 8 for std::filesystem
++# Use GCC 9 on CentOS 8, RHEL 8, AlmaLinux 8 and RockyLinux 8 for std::filesystem
+ # The dependency is installed by xrtdeps.sh
+-if [[ $CPU == "x86_64" ]] && [[ $OSDIST == "centos" || $OSDIST == "rhel" || $OSDIST == "almalinux" ]] && [[ $MAJOR == 8 ]]; then
++if [[ $CPU == "x86_64" ]] && [[ $OSDIST == "centos" || $OSDIST == "rhel" || $OSDIST == "almalinux" || $OSDIST == "rockylinux" ]] && [[ $MAJOR == 8 ]] ; then
+     source /opt/rh/gcc-toolset-9/enable
+ fi
+ 
+@@ -48,6 +49,8 @@
+     echo
+     echo "[-help]                     List this help"
+     echo "[clean|-clean]              Remove build directories"
++    echo "[-cc <c-compiler>]          C Compiler to use"
++    echo "[-cxx <c++-compiler>]       C++ Compiler to use"
+     echo "[-ci]                       Build is initiated by CI"
+     echo "[-dbg]                      Build debug library only (default)"
+     echo "[-opt]                      Build optimized library only (default)"
+@@ -68,7 +71,6 @@
+     echo "[-ccache]                   Build using RDI's compile cache"
+     echo "[-toolchain <file>]         Extra toolchain file to configure CMake"
+     echo "[-driver]                   Include building driver code"
+-    echo "[-xclbinutil]               Build xclbinutil only"
+     echo "[-checkpatch]               Run checkpatch.pl on driver code"
+     echo "[-verbose]                  Turn on verbosity when compiling"
+     echo "[-install_prefix <path>]    set CMAKE_INSTALL_PREFIX to path"
+@@ -92,6 +94,8 @@
+ clean=0
+ ccache=0
+ ci=0
++cc="/usr/bin/gcc"
++cxx="/usr/bin/g++"
+ docs=0
+ verbose=""
+ driver=0
+@@ -108,11 +112,10 @@
+ static_boost=""
+ ertbsp=""
+ ertfw=""
+-werror=1
++werror=0
+ alveo=1
+-xclbinutil=0
+-xrt_install_prefix="/opt/xilinx"
+-cmake_flags="-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
++xrt_install_prefix="/opt/Xilinx/xrt"
++cmake_flags=" -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
+ 
+ while [ $# -gt 0 ]; do
+     case "$1" in
+@@ -127,6 +130,14 @@
+             ci=1
+             shift
+             ;;
++        -cc)
++            cc=$1
++            shift
++            ;;
++        -cxx)
++            cxx=$1
++            shift
++            ;;
+         -noert)
+             noert=1
+             shift
+@@ -156,6 +167,10 @@
+             shift
+             cmake_flags+=" -DXRT_ENABLE_HIP=ON"
+             ;;
++        -nohip)
++            shift
++            cmake_flags+=" -DXRT_ENABLE_HIP=OFF"
++            ;;
+ 	-noalveo)
+             shift
+ 	    alveo=0
+@@ -223,10 +238,6 @@
+             cmake_flags+=" -DXRT_PSKERNEL_BUILD=ON"
+             shift
+             ;;
+-        -xclbinutil)
+-            xclbinutil=1
+-            shift
+-            ;;
+         -verbose)
+             verbose="VERBOSE=1"
+             shift
+@@ -264,6 +275,20 @@
+     cmake_flags+=" -DXRT_DKMS_ALVEO=ON"
+ fi
+ 
++oflag="-g -O2"
++oflag_debug="-g3 -O0"
++oflag_release="-g -O2"
++cflags="${oflag} -std=gnu11 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++cflags_debug="${oflag} -std=gnu11 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++cflags_release="${oflag} -std=gnu11 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++cxxflags="${oflag} -std=c++17 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++cxxflags_debug="${oflag} -std=c++17 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++cxxflags_release="${oflag} -std=c++17 -D_GNU_SOURCE -D_XOPEN_SOURCE=700"
++
++cmake_flags+=" -DCMAKE_C_COMPILER=$cc"
++cmake_flags+=" -DCMAKE_CXX_COMPILER=$cxx"
++cmake_flags+=" -DXAIENGINE_BUILD_SHARED=ON"
++
+ here=$PWD
+ cd $BUILDDIR
+ 
+@@ -344,17 +369,9 @@
+   cmake_flags+=" -DCMAKE_BUILD_TYPE=Debug"
+ 
+   if [[ $nocmake == 0 ]]; then
+-    if [[ $xclbinutil == 1 ]]; then
+-      # xclbinutil only build
+-      cmake_flags+=" -DXRT_SOURCE_DIR=$BUILDDIR/../src"
+-      echo "$CMAKE $cmake_flags ../../src/runtime_src/tools/xclbinutil"
+-      time $CMAKE $cmake_flags ../../src/runtime_src/tools/xclbinutil
+-    else
+-      # Full build
+       echo "$CMAKE $cmake_flags ../../src"
+       time $CMAKE $cmake_flags ../../src
+     fi
+-  fi
+ 
+   echo "make -j $jcore $verbose DESTDIR=$PWD install"
+   time make -j $jcore $verbose DESTDIR=$PWD install
+@@ -372,17 +389,9 @@
+   cmake_flags+=" -DCMAKE_BUILD_TYPE=Release"
+ 
+   if [[ $nocmake == 0 ]]; then
+-    if [[ $xclbinutil == 1 ]]; then
+-      # xclbinutil only build
+-      cmake_flags+=" -DXRT_SOURCE_DIR=$BUILDDIR/../src"
+-      echo "$CMAKE $cmake_flags ../../src/runtime_src/tools/xclbinutil"
+-      time $CMAKE $cmake_flags ../../src/runtime_src/tools/xclbinutil
+-    else
+-      # Full build
+       echo "$CMAKE $cmake_flags ../../src"
+       time $CMAKE $cmake_flags ../../src
+     fi
+-  fi
+ 
+   if [[ $nobuild == 0 ]]; then
+       echo "make -j $jcore $verbose DESTDIR=$PWD install"
+@@ -403,6 +412,7 @@
+   if [[ $driver == 1 ]]; then
+     unset CC
+     unset CXX
++
+     echo "make -C usr/src/xrt-2.18.0/driver/xocl"
+     make -C usr/src/xrt-2.18.0/driver/xocl
+     if [[ $CPU == "aarch64" ]]; then
+--- CMakeLists.txt	2025-04-10 18:24:43.510255027 -0400
++++ CMakeLists.txt	2025-04-11 18:33:46.378448523 -0400
+@@ -15,7 +15,6 @@
+ 
+ message("-- CMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}")
+ 
+-
+ # Enable testing for this directory and below.  This command should be
+ # in the source directory root because ctest expects to find a test
+ # file in the build directory root.
+--- src/CMake/config/prerm.in	2025-04-10 18:28:24.001438162 -0400
++++ src/CMake/config/prerm.in	2025-04-10 21:28:42.836983442 -0400
+@@ -57,7 +57,7 @@
+ rm -rf /etc/systemd/system/mpd.service
+ systemctl daemon-reload
+ # Remove config file for MSD as well
+-@@CMAKE_INSTALL_PREFIX@@/xrt/bin/xbmgmt --legacy config --purge 2>&1 > /dev/null
++@CMAKE_INSTALL_PREFIX@/xrt/bin/xbmgmt --legacy config --purge 2>&1 > /dev/null
+ 
+ echo "Unloading old XRT Linux kernel modules"
+ rmmod xocl
+@@ -79,7 +79,7 @@
+ rm -f /etc/dracut.conf.d/xclmgmt.dracut.conf
+ 
+ echo "Cleaning up python..."
+-rm -f @@CMAKE_INSTALL_PREFIX@@/xrt/python/*.pyc
+-rm -f @@CMAKE_INSTALL_PREFIX@@/xrt/test/*.pyc
++rm -f @CMAKE_INSTALL_PREFIX@/xrt/python/*.pyc
++rm -f @CMAKE_INSTALL_PREFIX@/xrt/test/*.pyc
+ 
+ exit 0
+--- src/CMake/config/prerm-azure.in	2025-04-10 18:24:43.512254965 -0400
++++ src/CMake/config/prerm-azure.in	2025-04-10 21:28:42.836983442 -0400
+@@ -30,7 +30,7 @@
+ # configuration of the components and hence we want to handle the configuration
+ # in postinst script.
+ 
+-DIR=@@CMAKE_INSTALL_PREFIX@@/xrt
++DIR=@CMAKE_INSTALL_PREFIX@/xrt
+ 
+ #In case prerm is called after postinst on centos, make sure not to stop mpd
+ awk -F= '$1=="ID" {print $2}' /etc/os-release | tr -d '"' | awk '{print tolower($1)}' | grep -Eq "^rhel|^centos"
+--- src/CMake/config/postinst.in	2025-04-10 18:24:43.512254965 -0400
++++ src/CMake/config/postinst.in	2025-04-10 21:28:42.838983381 -0400
+@@ -85,6 +85,21 @@
+     install -m 644 /usr/src/xrt-@XRT_VERSION_STRING@/driver/xocl/mgmtpf/xclmgmt.dracut.conf $DRACUT_CONF_PATH
+ fi
+ 
++if [ -d /usr/src/xrt-@XRT_VERSION_STRING@ ] ; then
++  here="`pwd`"
++  cd /usr/src
++  if [ -l xrt-xocl-@XRT_VERSION_STRING@ ] ; then
++    rm xrt-xocl-@XRT_VERSION_STRING@
++  fi
++
++  if [ -d xrt-xocl-@XRT_VERSION_STRING@ ] ; then
++    rm -rf xrt-xocl-@XRT_VERSION_STRING@
++  fi
++
++  ln -sf xrt-@XRT_VERSION_STRING@ xrt-xocl-@XRT_VERSION_STRING@
++  cd $here
++fi
++
+ if [ $alveo == 0]; then
+     echo "Skipping XRT Alveo driver install"
+     exit 0
+--- src/CMake/config/prerm-container.in	2025-04-10 18:24:43.512254965 -0400
++++ src/CMake/config/prerm-container.in	2025-04-10 21:28:42.838983381 -0400
+@@ -38,7 +38,7 @@
+ fi
+ 
+ echo "Remove mpd plugin"
+-rm -rf @@CMAKE_INSTALL_PREFIX@@/xrt/lib/libmpd_plugin.so > /dev/null 2>&1
++rm -rf @CMAKE_INSTALL_PREFIX@/xrt/lib/libmpd_plugin.so > /dev/null 2>&1
+ systemctl disable mpd > /dev/null 2>&1
+ systemctl stop mpd > /dev/null 2>&1
+ 
+--- src/CMake/nativeLnx.cmake	2025-04-10 18:28:24.002438131 -0400
++++ src/CMake/nativeLnx.cmake	2025-04-10 23:45:29.693384720 -0400
+@@ -8,6 +8,7 @@
+ # XRT_VERSION_MINOR
+ # XRT_VERSION_PATCH
+ 
++option(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
+ 
+ # --- PkgConfig ---
+ INCLUDE (FindPkgConfig)
+@@ -24,8 +25,13 @@
+ 
+ # --- OpenCL header files ---
+ find_package(OpenCL)
++# NVIDIA OpenCL
++# pkg_check_modules(OPENCL REQUIRED opencl-12.6)
+ IF(OPENCL_FOUND)
+   MESSAGE(STATUS "Looking for OPENCL - found at ${OPENCL_PREFIX} ${OPENCL_VERSION} ${OPENCL_INCLUDEDIR}")
++  MESSAGE(STATUS "OpenCL Prefix: ${OPENCL_PREFIX}")
++  MESSAGE(STATUS "OpenCL Version: ${OPENCL_VERSION}")
++  MESSAGE(STATUS "OpenCL Includes: ${OPENCL_INCLUDEDIR}")
+   INCLUDE_DIRECTORIES(${OPENCL_INCLUDEDIR})
+ ELSE(OPENCL_FOUND)
+   MESSAGE(FATAL_ERROR "Looking for OPENCL - not found")
+@@ -56,8 +62,13 @@
+     COMMAND awk "{print $4}" /etc/redhat-release
+     COMMAND tr -d "\""
+     OUTPUT_VARIABLE LINUX_VERSION
+-    OUTPUT_STRIP_TRAILING_WHITESPACE
+-  )
++    OUTPUT_STRIP_TRAILING_WHITESPACE)
++elseif (${LINUX_FLAVOR} MATCHES "^fedora")
++  execute_process(
++    COMMAND awk "{printf \"%s %s\", $1, $3}" /etc/fedora-release
++    COMMAND tr -d "\""
++    OUTPUT_VARIABLE LINUX_VERSION
++    OUTPUT_STRIP_TRAILING_WHITESPACE)
+ else()
+   execute_process(
+     COMMAND awk -F= "$1==\"VERSION_ID\" {print $2}" /etc/os-release
+@@ -72,6 +83,9 @@
+   OUTPUT_STRIP_TRAILING_WHITESPACE
+   )
+ 
++add_compile_options("-D_GNU_SOURCE")
++add_compile_options("-D_XOPEN_SOURCE=700")
++
+ # Static linking creates and installs static tools and libraries. The
+ # static libraries have system boost dependencies which must be
+ # resolved in final target.  The tools (currently xbutil2 and xbmgmt2)
+--- src/CMakeLists.txt	2025-04-10 18:24:43.513254934 -0400
++++ src/CMakeLists.txt	2025-04-11 20:18:21.894799536 -0400
+@@ -5,6 +5,15 @@
+ project(XRT)
+ set(PROJECT_DESCRIPTION "https://github.com/Xilinx/XRT")
+ 
++# Allow Duplicate Target Names
++cmake_policy(SET CMP0002 NEW)
++
++# Disable Boost warning
++cmake_policy(SET CMP0167 OLD)
++
++# Allow 'xaiengine' as a duplicate custom Target
++set_property(GLOBAL PROPERTY ALLOW_DUPLICATE_CUSTOM_TARGETS True)
++
+ # Include utility functions
+ include(CMake/utilities.cmake)
+ 
+@@ -22,7 +31,29 @@
+ 
+ include(CMake/settings.cmake)
+ 
++# Default component name for any install() command without the COMPONENT argument
++# The default component is the xrt run-time component, if XRT_DEV_COMPONENT is
++# set to something different then a development component will be created with
++# link libraries and header which are then excluded from runtime component
++set (CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "xrt")
++
++# Enable development package by specifying development component name
++# If XRT_DEV_COMPONENT is same DEFAULT_COMPONENT then only that package
++# is created with both development and run-time content.
++set (XRT_DEV_COMPONENT "xrt")
++
+ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/CMake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/aie-rt/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/aie-rt/src/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/core/common/aiebu/lib/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/core/common/aiebu/lib/aie-rt/fal/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/core/common/aiebu/lib/aie-rt/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/core/common/aiebu/src/cpp/ELFIO/cmake/")
++set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/aie-rt/fal/cmake/")
++# set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/aie-rt/driver/cmake/")
++# set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${XRT_SOURCE_DIR}/runtime_src/aie-rt/driver/")
++
++message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+ 
+ # This makes aiebu submodule use ELFIO from XRT
+ set(AIEBU_ELFIO_SRC_DIR "${XRT_SOURCE_DIR}/runtime_src/core/common/elf")
+--- src/runtime_src/ert/CMakeLists.txt	2025-04-10 18:28:24.015437729 -0400
++++ src/runtime_src/ert/CMakeLists.txt	2025-04-10 21:28:42.838983381 -0400
+@@ -1,15 +1,20 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
+ #
+-set(ERT_INSTALL_PREFIX "/opt/xilinx/xrt/share/fw")
++set(ERT_INSTALL_PREFIX "/opt/Xilinx/xrt/share/fw")
++set(XRT_INSTALL_PREFIX "/opt/Xilinx")
++
+ if (DEFINED XRT_INSTALL_PREFIX)
+   set(ERT_INSTALL_PREFIX "${XRT_INSTALL_PREFIX}/xrt/share/fw")
++  message(STATUS "XRT_INSTALL_PREFIX: ${XRT_INSTALL_PREFIX}")
++  message(STATUS "ERT_INSTALL_PREFIX: ${ERT_INSTALL_PREFIX}")
+ endif()
++
+ set(ERT_INSTALL_FIRMWARE_PREFIX "/lib/firmware/xilinx")
+ 
+-if ((EXISTS $ENV{XILINX_VITIS}/gnu/microblaze) AND (${XRT_NATIVE_BUILD} STREQUAL "yes") AND (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "x86_64"))
++if ((EXISTS $ENV{XILINX_VITIS}/2024.1/gnu/microblaze) AND (${XRT_NATIVE_BUILD} STREQUAL "yes") AND (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "x86_64"))
+ 
+-message("-- MicroBlaze toolchain found, preparing ERT build")
++message(STATUS "MicroBlaze toolchain found, preparing ERT build")
+ set(ERT_BUILD_ALL "yes")
+ add_subdirectory(scheduler)
+ 
+--- src/runtime_src/ert/ert.mk	2025-04-10 18:24:43.569253203 -0400
++++ src/runtime_src/ert/ert.mk	2025-04-10 21:28:42.838983381 -0400
+@@ -2,7 +2,7 @@
+ $(error  Environment variable XILINX_VITIS should point to Vitis install area)
+ endif
+ 
+-MB_HOME := $(XILINX_VITIS)/gnu/microblaze/lin
++MB_HOME := $(XILINX_VITIS)/2024.1/gnu/microblaze/lin
+ MB_PREFIX := mb-
+ 
+ CFLAGS   := -c -Wall -mlittle-endian -mxl-soft-mul -mcpu=v10.0
+--- src/runtime_src/CMakeLists.txt	2025-04-10 18:28:24.002438131 -0400
++++ src/runtime_src/CMakeLists.txt	2025-04-10 23:02:22.980954084 -0400
+@@ -35,6 +35,8 @@
+ xrt_add_subdirectory(tools/xclbinutil)
+ xrt_add_subdirectory(xocl)
+ xrt_add_subdirectory(xrt)
++xrt_add_subdirectory(aie-rt/fal)
++xrt_add_subdirectory(aie-rt/driver)
+ 
+ if (XRT_DKMS_ALVEO STREQUAL "ON")
+   xrt_add_subdirectory(ert)
+--- src/runtime_src/core/common/drv/include/xrt_cu.h	2025-04-10 18:28:24.004438069 -0400
++++ src/runtime_src/core/common/drv/include/xrt_cu.h	2025-04-10 21:28:42.839983350 -0400
+@@ -400,7 +400,7 @@
+ 	struct circ_buf		   crc_buf;
+ };
+ 
+-static inline char *prot2str(enum CU_PROTOCOL prot)
++inline static char *prot2str(enum CU_PROTOCOL prot)
+ {
+ 	switch (prot) {
+ 	case CTRL_HS:		return "CTRL_HS";
+@@ -413,34 +413,34 @@
+ 	}
+ }
+ 
+-static void inline xrt_cu_enable_intr(struct xrt_cu *xcu, u32 intr_type)
++inline static void xrt_cu_enable_intr(struct xrt_cu *xcu, u32 intr_type)
+ {
+ 	if (xcu->funcs)
+ 		xcu->funcs->enable_intr(xcu->core, intr_type);
+ }
+ 
+-static void inline xrt_cu_disable_intr(struct xrt_cu *xcu, u32 intr_type)
++inline static void xrt_cu_disable_intr(struct xrt_cu *xcu, u32 intr_type)
+ {
+ 	if (xcu->funcs)
+ 		xcu->funcs->disable_intr(xcu->core, intr_type);
+ }
+ 
+-static u32 inline xrt_cu_clear_intr(struct xrt_cu *xcu)
++inline static u32 xrt_cu_clear_intr(struct xrt_cu *xcu)
+ {
+ 	return xcu->funcs ? xcu->funcs->clear_intr(xcu->core) : 0;
+ }
+ 
+-static inline int xrt_cu_config(struct xrt_cu *xcu, u32 *data, size_t sz, int type)
++inline static int xrt_cu_config(struct xrt_cu *xcu, u32 *data, size_t sz, int type)
+ {
+ 	return xcu->funcs->configure(xcu->core, data, sz, type);
+ }
+ 
+-static inline void xrt_cu_start(struct xrt_cu *xcu)
++inline static void xrt_cu_start(struct xrt_cu *xcu)
+ {
+ 	xcu->funcs->start(xcu->core);
+ }
+ 
+-static inline int xrt_cu_submit_config(struct xrt_cu *xcu, struct kds_command *xcmd)
++inline static int xrt_cu_submit_config(struct xrt_cu *xcu, struct kds_command *xcmd)
+ {
+ 	if (!xcu->funcs->submit_config)
+ 		return -EINVAL;
+@@ -448,7 +448,7 @@
+ 	return xcu->funcs->submit_config(xcu->core, xcmd);
+ }
+ 
+-static inline struct kds_command *xrt_cu_get_complete(struct xrt_cu *xcu)
++inline static struct kds_command *xrt_cu_get_complete(struct xrt_cu *xcu)
+ {
+ 	if (!xcu->funcs->get_complete)
+ 		return NULL;
+@@ -456,7 +456,7 @@
+ 	return xcu->funcs->get_complete(xcu->core);
+ }
+ 
+-static inline int
++inline static int
+ xrt_cu_cmd_abort(struct xrt_cu *xcu, void *cond,
+ 		 bool (*match)(struct kds_command *xcmd, void *cond))
+ {
+@@ -466,7 +466,7 @@
+ 	return xcu->funcs->abort(xcu->core, cond, match);
+ }
+ 
+-static inline void xrt_cu_reset(struct xrt_cu *xcu)
++inline static void xrt_cu_reset(struct xrt_cu *xcu)
+ {
+ 	xcu->funcs->reset(xcu->core);
+ }
+--- src/runtime_src/core/common/aiebu/lib/aie-rt/driver/CMakeLists.txt	2025-04-10 21:43:12.505407765 -0400
++++ src/runtime_src/core/common/aiebu/lib/aie-rt/driver/CMakeLists.txt	2025-04-11 18:16:28.600997862 -0400
+@@ -0,0 +1,22 @@
++###############################################################################
++# Copyright (C) 2022-2023, Advanced Micro Devices, Inc. All Rights Reserved.
++# SPDX-License-Identifier: MIT
++###############################################################################
++
++cmake_minimum_required (VERSION 3.16.3)
++
++list (APPEND CMAKE_MODULE_PATH
++      "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
++      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules"
++      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/platforms")
++
++project (xaiengine VERSION 3.2)
++
++include (CheckIncludeFiles)
++include (CheckCSourceCompiles)
++include (collect)
++include (options)
++
++enable_testing ()
++
++add_subdirectory (src ${CMAKE_CURRENT_BINARY_DIR}/driver-src)
+--- src/runtime_src/core/common/aiebu/lib/aie-rt/driver/src/CMakeLists.txt	2025-04-11 18:16:28.600997862 -0400
++++ src/runtime_src/core/common/aiebu/lib/aie-rt/driver/src/CMakeLists.txt	2025-04-11 20:21:10.865616997 -0400
+@@ -4,6 +4,12 @@
+ ###############################################################################
+ 
+ cmake_minimum_required(VERSION 3.16.3)
++
++cmake_policy(SET CMP0002 NEW)
++
++# Allow 'xaiengine' as a duplicate custom Target
++set_property(GLOBAL PROPERTY ALLOW_DUPLICATE_CUSTOM_TARGETS True)
++
+ project(xaiengine LANGUAGES C VERSION 3.5)
+ 
+ set(CMAKE_C_STANDARD 11)
+--- src/runtime_src/core/common/aiebu/src/cpp/aiebu/CMakeLists.txt	2025-04-10 21:33:37.296985220 -0400
++++ src/runtime_src/core/common/aiebu/src/cpp/aiebu/CMakeLists.txt	2025-04-11 20:13:11.820309870 -0400
+@@ -1,6 +1,9 @@
+ # SPDX-License-Identifier: MIT
+ # Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.
+ 
++# Disable Boost warning
++cmake_policy(SET CMP0167 OLD)
++
+ set(Boost_USE_STATIC_LIBS ON)
+ INCLUDE (FindBoost)
+ message("-- Boost version: ${Boost_VERSION}")
+--- src/runtime_src/core/common/aiebu/src/cpp/aiebu/src/analyzer/transaction.cpp	2025-04-10 21:33:37.296985220 -0400
++++ src/runtime_src/core/common/aiebu/src/cpp/aiebu/src/analyzer/transaction.cpp	2025-04-11 17:48:40.384312978 -0400
+@@ -13,7 +13,7 @@
+ 
+ // https://gitenterprise.xilinx.com/tsiddaga/dynamic_op_dispatch/blob/main/include/transaction.hpp
+ 
+-#include "xaiengine.h"
++#include <xaiengine.h>
+ #include "transaction.hpp"
+ 
+ struct transaction::implementation {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ulite.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ulite.c	2025-04-10 21:28:42.839983350 -0400
+@@ -188,7 +188,8 @@
+ 
+ static int ulite_transmit(struct uart_port *port, int stat)
+ {
+-	struct circ_buf *xmit  = &port->state->xmit;
++	struct tty_port *tport = &port->state->port;
++	unsigned char ch;
+ 
+ 	if (stat & ULITE_STATUS_TXFULL)
+ 		return 0;
+@@ -200,15 +201,17 @@
+ 		return 1;
+ 	}
+ 
+-	if (uart_circ_empty(xmit) || uart_tx_stopped(port))
++        if (uart_tx_stopped(port))
+ 		return 0;
+ 
+-	uart_out32(xmit->buf[xmit->tail], ULITE_TX, port);
+-	xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE-1);
++	if (!uart_fifo_get(port, &ch))
++		return 0;
++
++	uart_out32(ch, ULITE_TX, port);
+ 	port->icount.tx++;
+ 
+ 	/* wake up */
+-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
++	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+ 		uart_write_wakeup(port);
+ 
+ 	return 1;
+@@ -564,19 +567,19 @@
+  * `return`.
+  * https://elixir.bootlin.com/linux/latest/source/include/linux/platform_device.h#L211
+  */
+-static int ulite_remove(struct platform_device *pdev)
++static void ulite_remove(struct platform_device *pdev)
+ {
+ 	struct uart_port *port = platform_get_drvdata(pdev);
+ 	struct uartlite_data *pdata;
+ 
+ 	if (!port)
+-		return 0;
++		return;
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &ulite_attr_group);
+ 
+ 	pdata = port->private_data;
+ 	if (!pdata)
+-		return 0;
++		return;
+ 
+ 	atomic_set(&pdata->console_opened, 0);
+ 	if (pdata->thread)
+@@ -585,8 +588,6 @@
+ 	uart_remove_one_port(pdata->xcl_ulite_driver, port);
+ 	platform_set_drvdata(pdev, NULL);
+ 	port->mapbase = 0;
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private ulite_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/am.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/am.c	2025-04-10 21:28:42.839983350 -0400
+@@ -74,6 +74,8 @@
+ static long stop_trace(struct xocl_am *am);
+ static long config_dataflow(struct xocl_am *am, void __user *arg);
+ 
++long am_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static long reset_counters(struct xocl_am *am)
+ {
+ 	uint32_t reg = 0;
+@@ -230,15 +232,15 @@
+ 			   .attrs = am_attrs,
+ };
+ 
+-static int am_remove(struct platform_device *pdev)
++static void am_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_am *am;
+ 	void *hdl;
+ 
+ 	am = platform_get_drvdata(pdev);
+ 	if (!am) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &am_attr_group);
+@@ -251,8 +253,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int am_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/spc.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/spc.c	2025-04-10 21:28:42.839983350 -0400
+@@ -32,6 +32,8 @@
+ 	struct spc_status	status;
+ };
+ 
++long spc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static void update_status(struct xocl_spc *spc)
+ {
+ 	spc->status.pc_asserted = XOCL_READ_REG32(spc->base + XSPC_PC_ASSERTED_OFFSET);
+@@ -74,15 +76,15 @@
+ 			   .attrs = spc_attrs,
+ };
+ 
+-static int spc_remove(struct platform_device *pdev)
++static void spc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_spc *spc;
+ 	void *hdl;
+ 
+ 	spc = platform_get_drvdata(pdev);
+ 	if (!spc) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &spc_attr_group);
+@@ -95,8 +97,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int spc_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/memory_hbm.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/memory_hbm.c	2025-04-10 21:28:42.840983320 -0400
+@@ -580,14 +580,14 @@
+ 	return 0;
+ }
+ 
+-static int mem_hbm_remove(struct platform_device *pdev)
++static void mem_hbm_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_mem_hbm	*mem_hbm;
+ 
+ 	mem_hbm = platform_get_drvdata(pdev);
+ 	if (!mem_hbm) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	vfree(mem_hbm->calib_cache);
+ 	mem_hbm->calib_cache = NULL;
+@@ -596,8 +596,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	devm_kfree(&pdev->dev, mem_hbm);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private mem_hbm_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xmc_u2.c	2025-04-10 18:24:43.543254007 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xmc_u2.c	2025-04-10 21:28:42.840983320 -0400
+@@ -3673,7 +3673,7 @@
+ 	xmc->bdinfo_raw = NULL;
+ }
+ 
+-static int xmc_remove(struct platform_device *pdev)
++static void xmc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_xmc *xmc;
+ 	void *hdl;
+@@ -3681,7 +3681,7 @@
+ 
+ 	xmc = platform_get_drvdata(pdev);
+ 	if (!xmc)
+-		return 0;
++		return;
+ 
+ 	xocl_drvinst_release(xmc, &hdl);
+ 
+@@ -3716,7 +3716,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static const char *xmc_get_board_info(uint32_t *bdinfo_raw,
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/iores.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/iores.c	2025-04-10 21:28:42.841983289 -0400
+@@ -83,15 +83,15 @@
+ 	.get_offset = get_offset,
+ };
+ 
+-static int iores_remove(struct platform_device *pdev)
++static void iores_remove(struct platform_device *pdev)
+ {
+ 	struct iores *iores;
+ 	int i;
+ 
+ 	iores = platform_get_drvdata(pdev);
+ 	if (!iores) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	for (i = 0; i < IORES_MAX; i++)
+@@ -100,8 +100,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, iores);
+-
+-	return 0;
+ }
+ 
+ static int iores_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/version_ctrl.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/version_ctrl.c	2025-04-10 21:28:42.841983289 -0400
+@@ -119,15 +119,15 @@
+ 	return 0;
+ }
+ 
+-static int version_ctrl_remove(struct platform_device *pdev)
++static void version_ctrl_remove(struct platform_device *pdev)
+ {
+ 	struct version_ctrl *version_ctrl;
+ 	void *hdl;
+ 
+ 	version_ctrl = platform_get_drvdata(pdev);
+ 	if (!version_ctrl) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(version_ctrl, &hdl);
+ 
+@@ -138,8 +138,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static struct xocl_version_ctrl_funcs vc_ops = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/scu.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/scu.c	2025-04-10 21:28:42.841983289 -0400
+@@ -325,15 +325,17 @@
+ 	return err;
+ }
+ 
+-static int scu_remove(struct platform_device *pdev)
++static void scu_remove(struct platform_device *pdev)
+ {
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+ 	struct xrt_cu_info *info = NULL;
+ 	struct xocl_cu *xcu = NULL;
+ 
+ 	xcu = platform_get_drvdata(pdev);
+-	if (!xcu)
+-		return -EINVAL;
++	if (!xcu) {
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
++	}
+ 
+ 	(void) sysfs_remove_group(&pdev->dev.kobj, &scu_attrgroup);
+ 	write_lock(&xcu->attr_rwlock);
+@@ -347,8 +349,6 @@
+ 		vfree(xcu->base.res);
+ 
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ static struct platform_device_id scu_id_table[] = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/p2p.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/p2p.c	2025-04-10 21:28:42.841983289 -0400
+@@ -1470,7 +1470,7 @@
+ 	return 0;
+ }
+ 
+-static int p2p_remove(struct platform_device *pdev)
++static void p2p_remove(struct platform_device *pdev)
+ {
+ 	struct p2p *p2p;
+ 	struct pci_dev *pcidev;
+@@ -1478,8 +1478,8 @@
+ 
+ 	p2p = platform_get_drvdata(pdev);
+ 	if (!p2p) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(p2p, &hdl);
+ 
+@@ -1499,8 +1499,6 @@
+ 	mutex_destroy(&p2p->p2p_lock);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int p2p_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/clock_wiz.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/clock_wiz.c	2025-04-10 21:28:42.841983289 -0400
+@@ -180,7 +180,7 @@
+  * target frequency. The steps are approximately 5 MHz apart. Table is
+  * generated by wiz.pl.
+  */
+-const static struct xclmgmt_ocl_clockwiz {
++static const struct xclmgmt_ocl_clockwiz {
+ 	/* target frequency */
+ 	unsigned short ocl;
+ 	/* config0 register */
+@@ -1245,14 +1245,14 @@
+ 	.get_data = clock_wiz_get_data,
+ };
+ 
+-static int clock_wiz_remove(struct platform_device *pdev)
++static void clock_wiz_remove(struct platform_device *pdev)
+ {
+ 	struct clock_wiz *clock_w;
+ 
+ 	clock_w = platform_get_drvdata(pdev);
+ 	if (!clock_w) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &clock_wiz_attr_group);
+@@ -1262,8 +1262,6 @@
+ 
+ 	CLOCK_W_INFO(clock_w, "successfully removed Clock Wizard subdev");
+ 	devm_kfree(&pdev->dev, clock_w);
+-
+-	return 0;
+ }
+ 
+ static int clock_wiz_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/fmgr.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/fmgr.c	2025-04-10 21:28:42.841983289 -0400
+@@ -195,7 +195,7 @@
+ 	return ret;
+ }
+ 
+-static int fmgr_remove(struct platform_device *pdev)
++static void fmgr_remove(struct platform_device *pdev)
+ {
+ #if defined(FPGA_MGR_SUPPORT)
+ 	struct fpga_manager *mgr = platform_get_drvdata(pdev);
+@@ -217,7 +217,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 	vfree(obj->blob);
+ 	kfree(obj);
+-	return 0;
+ }
+ 
+ static struct platform_driver	fmgr_driver = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_s2mm.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_s2mm.c	2025-04-10 21:28:42.841983289 -0400
+@@ -55,6 +55,8 @@
+ static long start_dma(struct xocl_trace_s2mm *trace_s2mm, void __user *arg);
+ static long get_wordcount(struct xocl_trace_s2mm *trace_s2mm, void __user *arg);
+ 
++long trace_s2mm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ bool dma_is_active(struct xocl_trace_s2mm *trace_s2mm)
+ {
+ 	uint32_t reg = 0;
+@@ -123,15 +125,15 @@
+ 	return 0;
+ }
+ 
+-static int trace_s2mm_remove(struct platform_device *pdev)
++static void trace_s2mm_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_trace_s2mm *trace_s2mm;
+ 	void *hdl;
+ 
+ 	trace_s2mm = platform_get_drvdata(pdev);
+ 	if (!trace_s2mm) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(trace_s2mm, &hdl);
+@@ -142,8 +144,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int trace_s2mm_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xdma.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xdma.c	2025-04-10 21:28:42.841983289 -0400
+@@ -538,7 +538,7 @@
+ 	return ret;
+ }
+ 
+-static int xdma_remove(struct platform_device *pdev)
++static void xdma_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_xdma *xdma = platform_get_drvdata(pdev);
+ 	xdev_handle_t xdev;
+@@ -546,8 +546,8 @@
+ 	int i;
+ 
+ 	if (!xdma) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xdev = xocl_get_xdev(pdev);
+@@ -581,8 +581,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	devm_kfree(&pdev->dev, xdma);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private xdma_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/aim.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/aim.c	2025-04-10 21:28:42.841983289 -0400
+@@ -89,6 +89,8 @@
+ static long stop_counters(struct xocl_aim *aim);
+ static long start_trace(struct xocl_aim *aim, void __user *arg);
+ 
++long aim_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static long reset_counters(struct xocl_aim *aim)
+ {
+ 	uint32_t reg = 0;
+@@ -244,15 +246,15 @@
+ 			   .attrs = aim_attrs,
+ };
+ 
+-static int aim_remove(struct platform_device *pdev)
++static void aim_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_aim *aim;
+ 	void *hdl;
+ 
+ 	aim = platform_get_drvdata(pdev);
+ 	if (!aim) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &aim_attr_group);
+@@ -265,8 +267,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int aim_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/clock_counter.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/clock_counter.c	2025-04-10 21:28:42.841983289 -0400
+@@ -267,14 +267,14 @@
+ 	.get_freq_counter = clock_counter_get_freq,
+ };
+ 
+-static int clock_counter_remove(struct platform_device *pdev)
++static void clock_counter_remove(struct platform_device *pdev)
+ {
+ 	struct clock_counter *clock_c;
+ 
+ 	clock_c = platform_get_drvdata(pdev);
+ 	if (!clock_c) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &clock_counter_attr_group);
+@@ -284,8 +284,6 @@
+ 
+ 	CLOCK_C_INFO(clock_c, "successfully removed Clock Counter subdev");
+ 	devm_kfree(&pdev->dev, clock_c);
+-
+-	return 0;
+ }
+ 
+ static int clock_counter_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/feature_rom.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/feature_rom.c	2025-04-10 21:28:42.842983259 -0400
+@@ -869,15 +869,15 @@
+ 	return ret;
+ }
+ 
+-static int feature_rom_remove(struct platform_device *pdev)
++static void feature_rom_remove(struct platform_device *pdev)
+ {
+ 	struct feature_rom *rom;
+ 
+ 	xocl_dbg(&pdev->dev, "Remove feature rom");
+ 	rom = platform_get_drvdata(pdev);
+ 	if (!rom) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	if (rom->base)
+ 		iounmap(rom->base);
+@@ -886,7 +886,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, rom);
+-	return 0;
+ }
+ 
+ struct xocl_drv_private rom_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/mig.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/mig.c	2025-04-10 21:28:42.842983259 -0400
+@@ -498,14 +498,14 @@
+ 	return 0;
+ }
+ 
+-static int mig_remove(struct platform_device *pdev)
++static void mig_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_mig	*mig;
+ 
+ 	mig = platform_get_drvdata(pdev);
+ 	if (!mig) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	sysfs_destroy_mig(pdev);
+ 	if (mig->base)
+@@ -513,8 +513,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	devm_kfree(&pdev->dev, mig);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private mig_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert.c	2025-04-10 21:28:42.842983259 -0400
+@@ -361,14 +361,16 @@
+ 	.stop			= stop_ert,
+ };
+ 
+-static int ert_remove(struct platform_device *pdev)
++static void ert_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_ert *ert;
+ 	void *hdl;
+ 
+ 	ert = platform_get_drvdata(pdev);
+-	if (!ert)
+-		return 0;
++	if (!ert) {
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
++	}
+ 
+ 	xocl_drvinst_release(ert, &hdl);
+ 
+@@ -393,7 +395,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static int ert_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/cu.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/cu.c	2025-04-10 21:28:42.842983259 -0400
+@@ -21,6 +21,7 @@
+ 	xocl_dbg(&xcuc->pdev->dev, fmt "\n", ##arg)
+ 
+ #define IRQ_DISABLED 0
++
+ struct xocl_cu {
+ 	struct xrt_cu		 base;
+ 	struct platform_device	*pdev;
+@@ -33,6 +34,9 @@
+ 	rwlock_t		 attr_rwlock;
+ };
+ 
++irqreturn_t cu_isr(int irq, void *arg);
++irqreturn_t ucu_isr(int irq, void *arg);
++
+ static ssize_t debug_show(struct device *dev,
+ 	struct device_attribute *attr, char *buf)
+ {
+@@ -518,7 +522,7 @@
+ 	return err;
+ }
+ 
+-static int cu_remove(struct platform_device *pdev)
++static void cu_remove(struct platform_device *pdev)
+ {
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+ 	struct xrt_cu_info *info;
+@@ -526,8 +530,10 @@
+ 	int err;
+ 
+ 	xcu = platform_get_drvdata(pdev);
+-	if (!xcu)
+-		return -EINVAL;
++	if (!xcu) {
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
++	}
+ 
+ 	(void) sysfs_remove_group(&pdev->dev.kobj, &cu_attrgroup);
+ 	write_lock(&xcu->attr_rwlock);
+@@ -559,8 +565,6 @@
+ 		vfree(xcu->base.res);
+ 
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ static struct platform_device_id cu_id_table[] = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/icap.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/icap.c	2025-04-10 21:28:42.843983228 -0400
+@@ -4304,7 +4304,7 @@
+ 	.bin_attrs = icap_bin_attrs,
+ };
+ 
+-static int icap_remove(struct platform_device *pdev)
++static void icap_remove(struct platform_device *pdev)
+ {
+ 	struct icap *icap = platform_get_drvdata(pdev);
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+@@ -4337,7 +4337,6 @@
+ 	ICAP_INFO(icap, "cleaned up successfully");
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ /*
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/dna.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/dna.c	2025-04-10 21:28:42.843983228 -0400
+@@ -463,14 +463,14 @@
+ }
+ 
+ 
+-static int xlnx_dna_remove(struct platform_device *pdev)
++static void xlnx_dna_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_xlnx_dna	*xlnx_dna;
+ 
+ 	xlnx_dna = platform_get_drvdata(pdev);
+ 	if (!xlnx_dna) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	mgmt_sysfs_destroy_xlnx_dna(pdev);
+@@ -480,8 +480,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, xlnx_dna);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private dna_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/firewall.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/firewall.c	2025-04-10 21:28:42.843983228 -0400
+@@ -589,15 +589,15 @@
+ 	.get_data = af_get_data,
+ };
+ 
+-static int firewall_remove(struct platform_device *pdev)
++static void firewall_remove(struct platform_device *pdev)
+ {
+ 	struct firewall *fw;
+ 	int     i;
+ 
+ 	fw = platform_get_drvdata(pdev);
+ 	if (!fw) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &firewall_attrgroup);
+@@ -608,7 +608,6 @@
+ 	}
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, fw);
+-	return 0;
+ }
+ 
+ static void get_fw_ep_name(const char *res_name, char *result)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/mailbox.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/mailbox.c	2025-04-10 21:28:42.844983198 -0400
+@@ -516,6 +516,14 @@
+ static int _mailbox_post_notify(struct platform_device *, void *, size_t);
+ static int mailbox_enable_intr_mode(struct mailbox *mbx);
+ static void mailbox_disable_intr_mode(struct mailbox *mbx, bool timer_on);
++irqreturn_t mailbox_isr(int irq, void *arg);
++void timeout_msg(struct mailbox_channel *ch);
++int mailbox_post_response(struct platform_device *pdev,
++                          enum xcl_mailbox_request req, u64 reqid, void *buf,
++                          size_t len);
++int mailbox_listen(struct platform_device *pdev, mailbox_msg_cb_t cb,
++                   void *cbarg);
++int mailbox_set(struct platform_device *pdev, enum mb_kind kind, u64 data);
+ 
+ static inline u32 mailbox_reg_rd(struct mailbox *mbx, u32 *reg)
+ {
+@@ -3101,7 +3109,7 @@
+ };
+ 
+ /* Tearing down driver in the exact reverse order as driver setting up. */
+-static int mailbox_remove(struct platform_device *pdev)
++static void mailbox_remove(struct platform_device *pdev)
+ {
+ 	struct mailbox *mbx = platform_get_drvdata(pdev);
+ 	void *hdl;
+@@ -3120,7 +3128,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static int mailbox_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/address_translator.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/address_translator.c	2025-04-10 21:28:42.844983198 -0400
+@@ -391,13 +391,13 @@
+ }
+ 
+ 
+-static int addr_translator_remove(struct platform_device *pdev)
++static void addr_translator_remove(struct platform_device *pdev)
+ {
+ 	struct addr_translator *addr_translator = platform_get_drvdata(pdev);
+ 
+ 	if (!addr_translator) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &addr_translator_attrgroup);
+@@ -407,8 +407,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, addr_translator);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private addr_translator_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/sysmon.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/sysmon.c	2025-04-10 21:28:42.844983198 -0400
+@@ -54,6 +54,8 @@
+ 	struct xocl_sysmon_privdata *priv_data;
+ };
+ 
++int32_t SYSMON_TO_MILLDEGREE(u32 val);
++
+ /* For ultrascale+ cards use sysmon4 equation 2-11 from UG580 doc
+  * Also, sysmon register will have all F's once mgmtpf bar goes offline
+  * during card shutdown sequence, so ignoring all F's.
+@@ -363,14 +365,14 @@
+ }
+ 
+ 
+-static int sysmon_remove(struct platform_device *pdev)
++static void sysmon_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_sysmon	*sysmon;
+ 
+ 	sysmon = platform_get_drvdata(pdev);
+ 	if (!sysmon) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	mgmt_sysfs_destroy_sysmon(pdev);
+@@ -380,8 +382,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, sysmon);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private sysmon_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/m2m.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/m2m.c	2025-04-10 21:28:42.844983198 -0400
+@@ -217,7 +217,7 @@
+ 	{ },
+ };
+ 
+-static int m2m_remove(struct platform_device *pdev)
++static void m2m_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_dev *xdev = xocl_get_xdev(pdev);
+ 	struct xocl_m2m	*m2m;
+@@ -225,8 +225,8 @@
+ 
+ 	m2m = platform_get_drvdata(pdev);
+ 	if (!m2m) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	
+ 	if (!m2m->m2m_polling)
+@@ -250,7 +250,6 @@
+ 
+ 	M2M_INFO(m2m, "successfully removed M2M subdev");
+ 	devm_kfree(&pdev->dev, m2m);
+-	return 0;
+ }
+ 
+ static int m2m_probe(struct platform_device *pdev)
+@@ -315,7 +314,7 @@
+ 	return 0;
+ 
+ failed:
+-	(void) m2m_remove(pdev);
++        m2m_remove(pdev);
+ 	return ret;
+ }
+ 
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/hwmon_sdm.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/hwmon_sdm.c	2025-04-10 21:28:42.844983198 -0400
+@@ -1229,15 +1229,15 @@
+ 	return err;
+ }
+ 
+-static int hwmon_sdm_remove(struct platform_device *pdev)
++static void hwmon_sdm_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_hwmon_sdm *sdm;
+ 	void *hdl;
+ 
+ 	sdm = platform_get_drvdata(pdev);
+ 	if (!sdm) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(sdm, &hdl);
+@@ -1248,8 +1248,6 @@
+ 	mutex_destroy(&sdm->sdm_lock);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static ssize_t
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/mailbox_versal.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/mailbox_versal.c	2025-04-10 21:28:42.845983167 -0400
+@@ -54,6 +54,8 @@
+ 
+ };
+ 
++irqreturn_t mailbox_versal_isr(int irq, void *arg);
++
+ static inline void mailbox_versal_reg_wr(struct mailbox_versal *mbv,
+ 		u32 *reg, u32 val)
+ {
+@@ -240,7 +242,7 @@
+ 	.free_intr      = mailbox_versal_free_intr,
+ };
+ 
+-static int mailbox_versal_remove(struct platform_device *pdev)
++static void mailbox_versal_remove(struct platform_device *pdev)
+ {
+ 	struct mailbox_versal *mbv = platform_get_drvdata(pdev);
+ 
+@@ -248,8 +250,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_release(mbv, NULL);
+-
+-	return 0;
+ }
+ 
+ static int mailbox_versal_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/pcie_firewall.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/pcie_firewall.c	2025-04-10 21:28:42.845983167 -0400
+@@ -79,15 +79,15 @@
+ 	.unblock = firewall_unblock,
+ };
+ 
+-static int firewall_remove(struct platform_device *pdev)
++static void firewall_remove(struct platform_device *pdev)
+ {
+ 	struct firewall *firewall;
+ 	void *hdl;
+ 
+ 	firewall = platform_get_drvdata(pdev);
+ 	if (!firewall) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(firewall, &hdl);
+ 
+@@ -97,8 +97,6 @@
+ 	mutex_destroy(&firewall->fw_lock);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int firewall_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_funnel.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_funnel.c	2025-04-10 21:28:42.845983167 -0400
+@@ -36,6 +36,8 @@
+ static long reset_funnel(struct trace_funnel *trace_funnel);
+ static long train_clock(struct trace_funnel *trace_funnel, void __user *arg);
+ 
++long trace_funnel_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static long reset_funnel(struct trace_funnel *trace_funnel)
+ {
+ 	uint32_t reg = TRACE_FUNNEL_RESET_VAL;
+@@ -64,15 +66,15 @@
+ 	return 0;
+ }
+ 
+-static int trace_funnel_remove(struct platform_device *pdev)
++static void trace_funnel_remove(struct platform_device *pdev)
+ {
+ 	struct trace_funnel *trace_funnel;
+ 	void *hdl;
+ 
+ 	trace_funnel = platform_get_drvdata(pdev);
+ 	if (!trace_funnel) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(trace_funnel, &hdl);
+@@ -83,8 +85,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int trace_funnel_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/qdma.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/qdma.c	2025-04-10 21:28:42.845983167 -0400
+@@ -893,7 +893,7 @@
+ 	return ret;
+ }
+ 
+-static int qdma_remove(struct platform_device *pdev)
++static void qdma_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_qdma *qdma= platform_get_drvdata(pdev);
+ 	xdev_handle_t xdev;
+@@ -905,8 +905,8 @@
+ 	sysfs_remove_group(&pdev->dev.kobj, &qdma_attrgroup);
+ 
+ 	if (!qdma) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xdev = xocl_get_xdev(pdev);
+@@ -931,8 +931,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private qdma_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/msix_xdma.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/msix_xdma.c	2025-04-10 21:28:42.845983167 -0400
+@@ -256,7 +256,7 @@
+ 	return ret;
+ }
+ 
+-static int msix_xdma_remove(struct platform_device *pdev)
++static void msix_xdma_remove(struct platform_device *pdev)
+ {
+ 	xdev_handle_t xdev;
+ 	struct xocl_msix_xdma *msix_xdma;
+@@ -265,8 +265,8 @@
+ 
+ 	msix_xdma = platform_get_drvdata(pdev);
+ 	if (!msix_xdma) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xdev = xocl_get_xdev(pdev);
+@@ -290,8 +290,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, msix_xdma);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private msix_xdma_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert_user.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert_user.c	2025-04-10 21:28:42.846983137 -0400
+@@ -147,6 +147,8 @@
+ static inline void ert_user_cmd_submit(struct xocl_ert_user *ert_user, struct xrt_ert_command *ecmd);
+ static void free_ert_user_event(struct ert_user_event *event);
+ 
++int ert_user_thread(void *data);
++
+ static ssize_t clock_timestamp_show(struct device *dev,
+ 			   struct device_attribute *attr, char *buf)
+ {
+@@ -1464,15 +1466,15 @@
+ }
+ 
+ 
+-static int ert_user_remove(struct platform_device *pdev)
++static void ert_user_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_ert_user *ert_user;
+ 	void *hdl;
+ 
+ 	ert_user = platform_get_drvdata(pdev);
+ 	if (!ert_user) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	ert_queue_intc_config(ert_user, false);
+@@ -1488,8 +1490,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int ert_user_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/axigate.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/axigate.c	2025-04-10 21:28:42.846983137 -0400
+@@ -148,14 +148,14 @@
+ 	.get_status = axigate_status,
+ };
+ 
+-static int axigate_remove(struct platform_device *pdev)
++static void axigate_remove(struct platform_device *pdev)
+ {
+ 	struct axi_gate *gate;
+ 
+ 	gate = platform_get_drvdata(pdev);
+ 	if (!gate) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	if (gate->sysfs_created)
+@@ -166,8 +166,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, gate);
+-
+-	return 0;
+ }
+ 
+ static int axigate_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/nifd.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/nifd.c	2025-04-10 21:28:42.846983137 -0400
+@@ -95,6 +95,9 @@
+                                     unsigned int previousMode);
+ static void start_controlled_clock_stepping(struct xocl_nifd* nifd);
+ 
++int __init xocl_init_nifd(void);
++void xocl_fini_nifd(void);
++
+ static long write_nifd_register(struct xocl_nifd* nifd, 
+                                 unsigned int value, 
+                                 enum NIFD_register_offset reg_offset)
+@@ -629,7 +632,7 @@
+     return err;
+ }
+ 
+-static int nifd_remove(struct platform_device *pdev)
++static void nifd_remove(struct platform_device *pdev)
+ {
+     struct xocl_nifd *nifd;
+     struct xocl_dev_core *core;
+@@ -641,8 +644,8 @@
+ 
+     nifd = platform_get_drvdata(pdev);
+     if (!nifd) {
+-        xocl_err(&pdev->dev, "driver data is NULL");
+-        return -EINVAL;
++        xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++        return;
+     }
+     xocl_drvinst_release(nifd, &hdl);
+ 
+@@ -650,8 +653,6 @@
+         iounmap(nifd->nifd_base);
+     platform_set_drvdata(pdev, NULL);
+     xocl_drvinst_free(hdl);
+-
+-    return 0;
+ }
+ 
+ struct xocl_drv_private nifd_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/lapc.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/lapc.c	2025-04-10 21:28:42.846983137 -0400
+@@ -39,6 +39,8 @@
+ 	struct lapc_status status;
+ };
+ 
++long lapc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static void update_status(struct xocl_lapc *lapc)
+ {
+ 	lapc->status.overall_status = XOCL_READ_REG32(lapc->base + LAPC_OVERALL_STATUS_OFFSET);
+@@ -93,15 +95,15 @@
+ 			   .attrs = lapc_attrs,
+ };
+ 
+-static int lapc_remove(struct platform_device *pdev)
++static void lapc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_lapc *lapc;
+ 	void *hdl;
+ 
+ 	lapc = platform_get_drvdata(pdev);
+ 	if (!lapc) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &lapc_attr_group);
+@@ -114,8 +116,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int lapc_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/accel_deadlock_detector.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/accel_deadlock_detector.c	2025-04-10 21:28:42.846983137 -0400
+@@ -27,6 +27,9 @@
+     struct debug_ip_data data;
+ };
+ 
++long accel_deadlock_detector_ioctl(struct file *filp, unsigned int cmd,
++                                   unsigned long arg);
++
+ static ssize_t name_show(struct device *dev,
+         struct device_attribute *attr, char *buf)
+ {
+@@ -61,15 +64,15 @@
+     .attrs = accel_deadlock_detector_attrs,
+ };
+ 
+-static int accel_deadlock_detector_remove(struct platform_device *pdev)
++static void accel_deadlock_detector_remove(struct platform_device *pdev)
+ {
+     struct xocl_accel_deadlock_detector *accel_deadlock_detector = NULL;
+     void *hdl = NULL;
+ 
+     accel_deadlock_detector = platform_get_drvdata(pdev);
+     if (!accel_deadlock_detector) {
+-        xocl_err(&pdev->dev, "driver data is NULL");
+-        return -EINVAL;
++        xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++        return;
+     }
+ 
+     sysfs_remove_group(&pdev->dev.kobj, &accel_deadlock_detector_attr_group);
+@@ -83,8 +86,6 @@
+     platform_set_drvdata(pdev, NULL);
+ 
+     xocl_drvinst_free(hdl);
+-
+-    return 0;
+ }
+ 
+ static int accel_deadlock_detector_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/asm.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/asm.c	2025-04-10 21:28:42.846983137 -0400
+@@ -56,6 +56,8 @@
+ static long stop_counters(struct xocl_asm *xocl_asm);
+ static long start_trace(struct xocl_asm *xocl_asm, void __user *arg);
+ 
++long asm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static long reset_counters(struct xocl_asm *xocl_asm)
+ {
+ 	uint32_t reg = 0;
+@@ -170,15 +172,15 @@
+ 			   .attrs = asm_attrs,
+ };
+ 
+-static int asm_remove(struct platform_device *pdev)
++static void asm_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_asm *xocl_asm;
+ 	void *hdl;
+ 
+ 	xocl_asm = platform_get_drvdata(pdev);
+ 	if (!xocl_asm) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &asm_attr_group);
+@@ -191,8 +193,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int asm_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ospi_versal.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ospi_versal.c	2025-04-10 21:28:42.847983106 -0400
+@@ -403,15 +403,14 @@
+ 	return 0;
+ }
+ 
+-static int xfer_versal_remove(struct platform_device *pdev)
++static void xfer_versal_remove(struct platform_device *pdev)
+ {
+ 	struct xfer_versal *xv = platform_get_drvdata(pdev);
+ 	void *hdl;
+-	int ret = 0;
+ 
+ 	if (!xv) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(xv, &hdl);
+@@ -420,9 +419,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	XV_INFO(xv, "return: %d", ret);
+-	return ret;
+ }
+ 
+ static int xfer_versal_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/flash.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/flash.c	2025-04-10 21:28:42.847983106 -0400
+@@ -1397,14 +1397,16 @@
+ 		sysfs_remove_group(&flash->pdev->dev.kobj, &flash_attr_group);
+ }
+ 
+-static int flash_remove(struct platform_device *pdev)
++static void flash_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_flash *flash;
+ 	void *hdl;
+ 
+ 	flash = platform_get_drvdata(pdev);
+-	if (!flash)
+-		return -EINVAL;
++	if (!flash) {
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
++	}
+ 
+ 	xocl_drvinst_release(flash, &hdl);
+ 	platform_set_drvdata(pdev, NULL);
+@@ -1419,7 +1421,6 @@
+ 
+ 	mutex_destroy(&flash->io_lock);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static int flash_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_fifo_lite.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_fifo_lite.c	2025-04-10 21:28:42.847983106 -0400
+@@ -37,6 +37,8 @@
+ static long reset_fifo(struct trace_fifo_lite *fifo);
+ static long get_numbytes(struct trace_fifo_lite *fifo, void __user *arg);
+ 
++long trace_fifo_lite_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
+ static long reset_fifo(struct trace_fifo_lite *fifo)
+ {
+ 	uint32_t regValue = AXI_FIFO_RESET_VALUE;
+@@ -61,15 +63,15 @@
+ 	return 0;
+ }
+ 
+-static int trace_fifo_lite_remove(struct platform_device *pdev)
++static void trace_fifo_lite_remove(struct platform_device *pdev)
+ {
+ 	struct trace_fifo_lite *trace_fifo_lite;
+ 	void *hdl;
+ 
+ 	trace_fifo_lite = platform_get_drvdata(pdev);
+ 	if (!trace_fifo_lite) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(trace_fifo_lite, &hdl);
+@@ -80,8 +82,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int trace_fifo_lite_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_fifo_full.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/trace_fifo_full.c	2025-04-10 21:28:42.847983106 -0400
+@@ -22,15 +22,17 @@
+ 	struct mutex 		lock;
+ };
+ 
+-static int trace_fifo_full_remove(struct platform_device *pdev)
++long trace_fifo_full_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
++
++static void trace_fifo_full_remove(struct platform_device *pdev)
+ {
+ 	struct trace_fifo_full *trace_fifo_full;
+ 	void *hdl;
+ 
+ 	trace_fifo_full = platform_get_drvdata(pdev);
+ 	if (!trace_fifo_full) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(trace_fifo_full, &hdl);
+@@ -38,8 +40,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int trace_fifo_full_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/cfg_gpio.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/cfg_gpio.c	2025-04-10 21:28:42.847983106 -0400
+@@ -102,15 +102,15 @@
+ 	mutex_unlock(&cfg_gpio->lock);
+ 	return ret;
+ }
+-static int config_gpio_remove(struct platform_device *pdev)
++static void config_gpio_remove(struct platform_device *pdev)
+ {
+ 	struct config_gpio *config_gpio;
+ 	void *hdl;
+ 
+ 	config_gpio = platform_get_drvdata(pdev);
+ 	if (!config_gpio) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_drvinst_release(config_gpio, &hdl);
+@@ -118,8 +118,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int config_gpio_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/icap_cntrl.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/icap_cntrl.c	2025-04-10 21:28:42.847983106 -0400
+@@ -166,15 +166,15 @@
+ 	return 0;
+ }
+ 
+-static int icap_cntrl_remove(struct platform_device *pdev)
++static void icap_cntrl_remove(struct platform_device *pdev)
+ {
+ 	struct icap_cntrl *icap_cntrl;
+ 	void *hdl;
+ 
+ 	icap_cntrl = platform_get_drvdata(pdev);
+ 	if (!icap_cntrl) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(icap_cntrl, &hdl);
+ 
+@@ -186,8 +186,6 @@
+ 	mutex_destroy(&icap_cntrl->icap_cntrl_lock);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int icap_cntrl_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/microblaze.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/microblaze.c	2025-04-10 21:28:42.848983075 -0400
+@@ -612,14 +612,14 @@
+ 
+ 
+ 
+-static int mb_remove(struct platform_device *pdev)
++static void mb_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_mb *mb;
+ 	int	i;
+ 
+ 	mb = platform_get_drvdata(pdev);
+ 	if (!mb)
+-		return 0;
++		return;
+ 
+ 	if (mb->mgmt_binary)
+ 		devm_kfree(&pdev->dev, mb->mgmt_binary);
+@@ -644,8 +644,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, mb);
+-
+-	return 0;
+ }
+ 
+ static int mb_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xmc.c	2025-04-10 18:24:43.543254007 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xmc.c	2025-04-10 21:28:42.848983075 -0400
+@@ -3931,7 +3931,7 @@
+ 	xmc->bdinfo_raw = NULL;
+ }
+ 
+-static int xmc_remove(struct platform_device *pdev)
++static void xmc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_xmc *xmc;
+ 	void *hdl;
+@@ -3939,7 +3939,7 @@
+ 
+ 	xmc = platform_get_drvdata(pdev);
+ 	if (!xmc)
+-		return 0;
++		return;
+ 
+ 	xocl_drvinst_release(xmc, &hdl);
+ 
+@@ -3974,7 +3974,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static const char *xmc_get_board_info(uint32_t *bdinfo_raw,
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/mgmt_msix.c	2025-04-10 18:24:43.541254069 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/mgmt_msix.c	2025-04-10 21:28:42.848983075 -0400
+@@ -322,7 +322,7 @@
+ 	return ret;
+ }
+ 
+-static int mgmt_msix_remove(struct platform_device *pdev)
++static void mgmt_msix_remove(struct platform_device *pdev)
+ {
+ 	xdev_handle_t xdev;
+ 	struct xocl_mgmt_msix *mgmt_msix;
+@@ -331,8 +331,8 @@
+ 
+ 	mgmt_msix = platform_get_drvdata(pdev);
+ 	if (!mgmt_msix) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xdev = xocl_get_xdev(pdev);
+@@ -351,8 +351,6 @@
+ 	devm_kfree(&pdev->dev, mgmt_msix->user_msix_table);
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, mgmt_msix);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private mgmt_msix_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/calib_storage.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/calib_storage.c	2025-04-10 21:28:42.849983045 -0400
+@@ -173,21 +173,19 @@
+ }
+ 
+ 
+-static int calib_storage_remove(struct platform_device *pdev)
++static void calib_storage_remove(struct platform_device *pdev)
+ {
+ 	struct calib_storage *calib_storage = platform_get_drvdata(pdev);
+ 
+ 	if (!calib_storage) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	calib_cache_clean(pdev);
+ 	vfree(calib_storage->cache);
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, calib_storage);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private calib_storage_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xgq_vmr.c	2025-04-10 18:28:24.010437883 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xgq_vmr.c	2025-04-10 21:28:42.849983045 -0400
+@@ -3351,7 +3351,7 @@
+ 	return 0;
+ }
+ 
+-static int xgq_vmr_remove(struct platform_device *pdev)
++static void xgq_vmr_remove(struct platform_device *pdev)
+ {
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+ 	struct xocl_xgq_vmr	*xgq;
+@@ -3359,8 +3359,8 @@
+ 
+ 	xgq = platform_get_drvdata(pdev);
+ 	if (!xgq) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(xgq, &hdl);
+ 
+@@ -3388,7 +3388,6 @@
+ 	xocl_drvinst_free(hdl);
+ 
+ 	XGQ_INFO(xgq, "successfully removed xgq subdev");
+-	return 0;
+ }
+ /* Function to query VMR and return the appropriate
+  * SC status.
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/pmc.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/pmc.c	2025-04-10 21:28:42.849983045 -0400
+@@ -138,14 +138,14 @@
+ 	.enable_reset = pmc_enable_reset,
+ };
+ 
+-static int pmc_remove(struct platform_device *pdev)
++static void pmc_remove(struct platform_device *pdev)
+ {
+ 	struct pmc *pmc;
+ 
+ 	pmc = platform_get_drvdata(pdev);
+ 	if (!pmc) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &pmc_attr_group);
+@@ -155,7 +155,6 @@
+ 	devm_kfree(&pdev->dev, pmc);
+ 
+ 	PMC_INFO(pmc, "successfully removed pmc subdev");
+-	return 0;
+ }
+ 
+ static int pmc_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xiic.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xiic.c	2025-04-10 21:28:42.849983045 -0400
+@@ -861,7 +861,7 @@
+ 
+ static struct i2c_adapter xiic_adapter = {
+ 	.owner = THIS_MODULE,
+-	.class = I2C_CLASS_HWMON | I2C_CLASS_SPD,
++	.class = I2C_CLASS_HWMON,
+ 	.algo = &xiic_algorithm,
+ };
+ 
+@@ -1030,14 +1030,14 @@
+ 	return ret;
+ }
+ 
+-static int xiic_remove(struct platform_device *pdev)
++static void xiic_remove(struct platform_device *pdev)
+ {
+ 	struct xiic_i2c *i2c;
+ 
+ 	i2c = platform_get_drvdata(pdev);
+ 	if (!i2c) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return 0;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	if (i2c->lm63) {
+@@ -1050,8 +1050,6 @@
+ 
+ 	devm_kfree(&pdev->dev, i2c);
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ struct platform_device_id xiic_id_table[] = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/command_queue.c	2025-04-10 18:24:43.539254131 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/command_queue.c	2025-04-10 21:28:42.849983045 -0400
+@@ -626,7 +626,7 @@
+ 	.intc_config = command_queue_intc_config,
+ };
+ 
+-static int command_queue_remove(struct platform_device *pdev)
++static void command_queue_remove(struct platform_device *pdev)
+ {
+ 	struct xrt_ert *command_queue;
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+@@ -634,8 +634,8 @@
+ 
+ 	command_queue = platform_get_drvdata(pdev);
+ 	if (!command_queue) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	xocl_subdev_destroy_by_id(xdev, XOCL_SUBDEV_ERT_USER);
+@@ -647,8 +647,6 @@
+ 	platform_set_drvdata(pdev, NULL);
+ 
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int command_queue_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/xvc.c	2025-04-10 18:24:43.543254007 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/xvc.c	2025-04-10 21:28:42.851982984 -0400
+@@ -386,15 +386,15 @@
+ }
+ 
+ 
+-static int xvc_remove(struct platform_device *pdev)
++static void xvc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_xvc	*xvc;
+ 	void *hdl;
+ 
+ 	xvc = platform_get_drvdata(pdev);
+ 	if (!xvc) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 	xocl_drvinst_release(xvc, &hdl);
+ 	if (xvc->base)
+@@ -402,8 +402,6 @@
+ 
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private xvc_pub = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ddr_srsr.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ddr_srsr.c	2025-04-10 21:28:42.851982984 -0400
+@@ -312,13 +312,13 @@
+ }
+ 
+ 
+-static int xocl_ddr_srsr_remove(struct platform_device *pdev)
++static void xocl_ddr_srsr_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_ddr_srsr *xocl_ddr_srsr = platform_get_drvdata(pdev);
+ 
+ 	if (!xocl_ddr_srsr) {
+-		xocl_err(&pdev->dev, "driver data is NULL");
+-		return -EINVAL;
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
+ 	}
+ 
+ 	sysfs_remove_group(&pdev->dev.kobj, &xocl_ddr_srsr_attrgroup);
+@@ -329,8 +329,6 @@
+ 	vfree(xocl_ddr_srsr->calib_cache);
+ 	platform_set_drvdata(pdev, NULL);
+ 	devm_kfree(&pdev->dev, xocl_ddr_srsr);
+-
+-	return 0;
+ }
+ 
+ struct xocl_drv_private srsr_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/intc.c	2025-04-10 18:28:24.009437914 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/intc.c	2025-04-10 21:28:42.851982984 -0400
+@@ -120,6 +120,8 @@
+ 	struct intr_metadata	 cu[INTR_NUM];
+ };
+ 
++irqreturn_t intc_isr(int irq, void *arg);
++
+ static ssize_t
+ intc_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+@@ -652,7 +654,7 @@
+ 	return ret;
+ }
+ 
+-static int intc_remove(struct platform_device *pdev)
++static void intc_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_intc *intc = platform_get_drvdata(pdev);
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+@@ -669,7 +671,6 @@
+ 	xocl_drvinst_release(intc, &hdl);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-	return 0;
+ }
+ 
+ static struct xocl_intc_funcs intc_ops = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert_ctrl.c	2025-04-10 18:24:43.540254100 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ert_ctrl.c	2025-04-10 21:28:42.851982984 -0400
+@@ -880,7 +880,7 @@
+ 	return 0;
+ }
+ 
+-static int ert_ctrl_remove(struct platform_device *pdev)
++static void ert_ctrl_remove(struct platform_device *pdev)
+ {
+ 	struct ert_ctrl	*ec = NULL;
+ 	xdev_handle_t xdev = xocl_get_xdev(pdev);
+@@ -889,8 +889,10 @@
+ 	int i = 0;
+ 
+ 	ec = platform_get_drvdata(pdev);
+-	if (!ec)
+-		return -EINVAL;
++	if (!ec) {
++		xocl_err(&pdev->dev, "ERROR: driver data is NULL");
++		return;
++	}
+ 
+ 	for (i = 0; i < ec->ec_num_xgq_ips; i++) {
+ 		xgq_ips = &ec->ec_xgq_ips[i];
+@@ -908,8 +910,6 @@
+ 	xocl_drvinst_release(ec, &hdl);
+ 	platform_set_drvdata(pdev, NULL);
+ 	xocl_drvinst_free(hdl);
+-
+-	return 0;
+ }
+ 
+ static int ert_ctrl_probe(struct platform_device *pdev)
+--- src/runtime_src/core/pcie/driver/linux/xocl/subdev/ps.c	2025-04-10 18:24:43.542254038 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/subdev/ps.c	2025-04-10 21:28:42.851982984 -0400
+@@ -345,13 +345,13 @@
+ 	return 0;
+ }
+ 
+-static int ps_remove(struct platform_device *pdev)
++static void ps_remove(struct platform_device *pdev)
+ {
+ 	struct xocl_ps *ps;
+ 
+ 	ps = platform_get_drvdata(pdev);
+ 	if (!ps)
+-		return -EINVAL;
++		return;
+ 
+ 	ps_sysfs_destroy(ps);
+ 	if (ps->base_addr)
+@@ -361,8 +361,6 @@
+ 	devm_kfree(&pdev->dev, ps);
+ 
+ 	mutex_destroy(&ps->ps_lock);
+-
+-	return 0;
+ };
+ 
+ struct xocl_drv_private ps_priv = {
+--- src/runtime_src/core/pcie/driver/linux/xocl/xocl_subdev.c	2025-04-10 18:24:43.545253945 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/xocl_subdev.c	2025-04-10 21:28:42.851982984 -0400
+@@ -252,7 +252,7 @@
+ 	struct xocl_dev_core *core = xdev_hdl;
+ 	int i, subdev_num = 0;
+ 
+-	subdev_info = vzalloc(sizeof(*subdev_info) *
++	subdev_info = vzalloc_noprof(sizeof(*subdev_info) *
+ 		(core->dyn_subdev_num + core->priv.subdev_num));
+ 	if (!subdev_info)
+ 		return NULL;
+@@ -269,7 +269,7 @@
+ 				&core->dyn_subdev_store[i].info);
+ 	}
+ 	if (subdev_num <= 0) {
+-		vfree(subdev_info);
++		kvfree(subdev_info);
+ 		*num = 0;
+ 		return NULL;
+ 	}
+@@ -460,7 +460,7 @@
+ 	}
+ 
+ 	if (subdev->info.num_res > 0) {
+-		res = vzalloc(sizeof (*res) * subdev->info.num_res);
++		res = vzalloc_noprof(sizeof (*res) * subdev->info.num_res);
+ 		if (!res) {
+ 			retval = -ENOMEM;
+ 			goto error;
+@@ -534,7 +534,7 @@
+ 	}
+ 
+ 	if (!priv_data) {
+-		priv_data = vzalloc(subdev->info.data_len + struct_size(priv_data, data, 1));
++ 		priv_data = vzalloc_noprof(subdev->info.data_len + sizeof(*priv_data));
+ 		if (!priv_data) {
+ 			retval = -ENOMEM;
+ 			goto error;
+@@ -2205,7 +2205,7 @@
+ 	if (ret)
+ 		goto failed;
+ 
+-	*buf = vmalloc(fw->size);
++	*buf = kvmalloc(fw->size, GFP_KERNEL);
+ 	if (!*buf) {
+ 		ret = -ENOMEM;
+ 		goto failed;
+--- src/runtime_src/core/pcie/driver/linux/xocl/xocl_drv.h	2025-04-10 18:28:24.011437853 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/xocl_drv.h	2025-04-10 21:28:42.852982953 -0400
+@@ -43,6 +43,7 @@
+ #include <linux/types.h>
+ #include <linux/moduleparam.h>
+ #include <linux/cdev.h>
++#include <linux/vmalloc.h>
+ 
+ #include "xocl_types.h"
+ #include "xclbin.h"
+@@ -462,7 +463,7 @@
+ {
+ 	struct xocl_subdev_priv *priv;
+ 
+-	priv = vzalloc(struct_size(priv, data, 1) + size);
++ 	priv = vzalloc_noprof(sizeof(*priv) + size);
+ 	if (!priv)
+ 		return NULL;
+ 
+--- src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/windows/sys/libqdma/source/qdma_access/qdma_access_common.h	2025-04-10 18:24:51.000000000 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/windows/sys/libqdma/source/qdma_access/qdma_access_common.h	2025-04-12 09:30:02.000000000 -0400
+@@ -23,6 +23,7 @@
+ 
+ #include "qdma_access_export.h"
+ #include "qdma_access_errors.h"
++#include <linux/bitfield.h>
+ 
+ /* QDMA HW version string array length */
+ #define QDMA_HW_VERSION_STRING_LEN			32
+@@ -70,8 +71,6 @@
+ 
+ #define FIELD_SHIFT(mask)       get_trailing_zeros(mask)
+ #define FIELD_SET(mask, val)    ((val << FIELD_SHIFT(mask)) & mask)
+-#define FIELD_GET(mask, reg)    ((reg & mask) >> FIELD_SHIFT(mask))
+-
+ 
+ /* CSR Default values */
+ #define DEFAULT_MAX_DSC_FETCH               6
+--- src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_access_common.h	2025-04-10 18:24:51.000000000 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_access_common.h	2025-04-12 09:30:25.000000000 -0400
+@@ -24,6 +24,7 @@
+ 
+ #include "qdma_access_export.h"
+ #include "qdma_access_errors.h"
++#include <linux/bitfield.h>
+ 
+ /* QDMA HW version string array length */
+ #define QDMA_HW_VERSION_STRING_LEN			32
+@@ -71,8 +72,6 @@
+ 
+ #define FIELD_SHIFT(mask)       get_trailing_zeros(mask)
+ #define FIELD_SET(mask, val)    ((val << FIELD_SHIFT(mask)) & mask)
+-#define FIELD_GET(mask, reg)    ((reg & mask) >> FIELD_SHIFT(mask))
+-
+ 
+ /* CSR Default values */
+ #define DEFAULT_MAX_DSC_FETCH               6
+--- src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/DPDK/drivers/net/qdma/qdma_access/qdma_access_common.h	2025-04-10 18:24:51.000000000 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/lib/libqdma/QDMA/DPDK/drivers/net/qdma/qdma_access/qdma_access_common.h	2025-04-12 09:30:45.000000000 -0400
+@@ -40,6 +40,7 @@
+ 
+ #include "qdma_access_export.h"
+ #include "qdma_access_errors.h"
++#include <linux/bitfield.h>
+ 
+ /* QDMA HW version string array length */
+ #define QDMA_HW_VERSION_STRING_LEN			32
+@@ -87,8 +88,6 @@
+ 
+ #define FIELD_SHIFT(mask)       get_trailing_zeros(mask)
+ #define FIELD_SET(mask, val)    ((val << FIELD_SHIFT(mask)) & mask)
+-#define FIELD_GET(mask, reg)    ((reg & mask) >> FIELD_SHIFT(mask))
+-
+ 
+ /* CSR Default values */
+ #define DEFAULT_MAX_DSC_FETCH               6
+--- src/runtime_src/core/pcie/driver/linux/xocl/lib/libfdt/fdt_ro.c	2025-04-10 18:24:43.536254223 -0400
++++ src/runtime_src/core/pcie/driver/linux/xocl/lib/libfdt/fdt_ro.c	2025-04-12 08:10:21.695112640 -0400
+@@ -326,8 +326,7 @@
+ 		 * give only the leaf name (after all /). The actual tree
+ 		 * contents are loosely checked.
+ 		 */
+-		const char *leaf;
+-		leaf = strrchr(nameptr, '/');
++		const char *leaf = nameptr ? strrchr(nameptr, '/') : NULL;
+ 		if (leaf == NULL) {
+ 			err = -FDT_ERR_BADSTRUCTURE;
+ 			goto fail;
+@@ -336,7 +335,7 @@
+ 	}
+ 
+ 	if (len)
+-		*len = strlen(nameptr);
++		*len = nameptr ? strlen(nameptr) : 0;
+ 
+ 	return nameptr;
+ 
+--- src/runtime_src/core/tools/xbflash2/CMakeLists.txt	2025-04-10 18:24:43.554253667 -0400
++++ src/runtime_src/core/tools/xbflash2/CMakeLists.txt	2025-04-11 20:14:18.147275547 -0400
+@@ -3,6 +3,8 @@
+ # Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+ #
+ 
++cmake_policy(SET CMP0167 OLD)
++
+ find_package(Boost
+   REQUIRED COMPONENTS system program_options)
+ 
+--- src/runtime_src/aie-rt/fal/CMakeLists.txt	2025-04-10 18:24:51.838997532 -0400
++++ src/runtime_src/aie-rt/fal/CMakeLists.txt	2025-04-11 20:03:45.658869129 -0400
+@@ -4,7 +4,7 @@
+ #
+ ###############################################################################
+ 
+-cmake_minimum_required (VERSION 3.0)
++cmake_minimum_required (VERSION 3.6)
+ 
+ list (APPEND CMAKE_MODULE_PATH
+       "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
+--- src/runtime_src/aie-rt/fal/src/CMakeLists.txt	2025-04-10 18:24:51.838997532 -0400
++++ src/runtime_src/aie-rt/fal/src/CMakeLists.txt	2025-04-11 20:04:05.109263165 -0400
+@@ -4,7 +4,7 @@
+ #
+ ###############################################################################
+ 
+-cmake_minimum_required (VERSION 3.0)
++cmake_minimum_required (VERSION 3.6)
+ 
+ file(GLOB_RECURSE _sources *.cpp)
+ file(GLOB_RECURSE _headers *.hpp)
+--- src/runtime_src/aie-rt/driver/src/CMakeLists.txt	2025-04-10 18:24:51.808998459 -0400
++++ src/runtime_src/aie-rt/driver/src/CMakeLists.txt	2025-04-11 21:33:32.739131210 -0400
+@@ -4,7 +4,13 @@
+ ###############################################################################
+ 
+ cmake_minimum_required(VERSION 3.16.3)
+-project(xaiengine LANGUAGES C VERSION 3.5)
++
++cmake_policy(SET CMP0002 NEW)
++
++# Allow 'xaiengine' as a duplicate custom Target
++set_property(GLOBAL PROPERTY ALLOW_DUPLICATE_CUSTOM_TARGETS True)
++
++project(xaiengine-driver LANGUAGES C VERSION 3.5)
+ 
+ set(CMAKE_C_STANDARD 11)
+ 
+--- src/runtime_src/xocl/CMakeLists.txt	2025-04-10 18:28:24.021437543 -0400
++++ src/runtime_src/xocl/CMakeLists.txt	2025-04-11 22:16:11.000741449 -0400
+@@ -111,7 +111,7 @@
+ # Release OpenCL extension headers
+ install (FILES
+   ${XRT_SOURCE_DIR}/include/1_2/CL/cl_ext_xilinx.h
+-  ${XRT_SOURCE_DIR}/include/1_2/CL/cl_ext.h
++  ${XRT_SOURCE_DIR}/include/1_2/CL/cl_ext_xocl.h
+   ${XRT_SOURCE_DIR}/include/1_2/CL/cl2xrt.hpp
+   DESTINATION ${XRT_INSTALL_INCLUDE_DIR}/CL
+   COMPONENT ${XRT_DEV_COMPONENT}
+--- src/runtime_src/xocl/config.h	2025-04-10 18:28:24.021437543 -0400
++++ src/runtime_src/xocl/config.h	2025-04-11 11:31:47.075210662 -0400
+@@ -17,8 +17,20 @@
+ #ifndef xocl_config_h_
+ #define xocl_config_h_
+ 
++#ifndef CL_HPP_ENABLE_EXCEPTIONS
++# define CL_HPP_ENABLE_EXCEPTIONS
++#endif
++
++#ifndef CL_HPP_MINIMUM_OPENCL_VERSION
++# define CL_HPP_MINIMUM_OPENCL_VERSION 200
++#endif
++
+ #ifndef CL_TARGET_OPENCL_VERSION
+-# define CL_TARGET_OPENCL_VERSION 200
++# define CL_TARGET_OPENCL_VERSION 300
++#endif
++
++#ifndef CL_HPP_TARGET_OPENCL_VERSION
++# define CL_HPP_TARGET_OPENCL_VERSION 300
+ #endif
+ 
+ #ifdef _WIN32
+@@ -40,6 +52,7 @@
+ #include "xrt/config.h"
+ #include "xocl/api/icd/ocl_icd_bindings.h"
+ #include "xocl/core/debug.h"
++#include "CL/cl_ext_xilinx.h"
+ 
+ #define XOCL_UNUSED XRT_UNUSED
+ 
+--- src/runtime_src/xocl/api/icd/ocl_icd_bindings.h	2025-04-10 18:28:24.021437543 -0400
++++ src/runtime_src/xocl/api/icd/ocl_icd_bindings.h	2025-04-11 11:14:26.463494332 -0400
+@@ -25,6 +25,14 @@
+ # include "windows/icd_dispatch.h"
+ using _cl_icd_dispatch = KHRicdVendorDispatchRec;
+ #else
++#define cl_device_partition_property_ext cl_ulong
++
++#if 0
++#ifndef clIcdGetPlatformIDsKHR
++#define clIcdGetPlatformIDsKHR clGetPlatformIDs
++#endif
++#endif
++
+ # include <ocl_icd.h>
+ #endif
+ extern const _cl_icd_dispatch cl_icd_dispatch;
+--- src/runtime_src/xocl/api/icd/windows/icd_dispatch.h	2025-04-10 18:24:43.764247175 -0400
++++ src/runtime_src/xocl/api/icd/windows/icd_dispatch.h	2025-04-11 13:09:53.200368645 -0400
+@@ -55,7 +55,7 @@
+ #endif
+ #include <CL/cl_gl.h>
+ #include <CL/cl_gl_ext.h>
+-#include <CL/cl_ext.h>
++#include <CL/cl_ext_xocl.h>
+ #include <CL/cl_egl.h>
+ 
+ /*
+--- src/runtime_src/xocl/api/clGetExtensionFunctionAddressForPlatform.cpp	2025-04-10 18:24:43.763247205 -0400
++++ src/runtime_src/xocl/api/clGetExtensionFunctionAddressForPlatform.cpp	2025-04-11 13:39:08.354023036 -0400
+@@ -14,9 +14,12 @@
+  * under the License.
+  */
+ #include "xocl/config.h"
++#include "api.h"
++#include "icd/ocl_icd_bindings.h"
+ #include "detail/platform.h"
+ #include "xocl/core/platform.h"
+ #include "plugin/xdp/profile_v2.h"
++#include <CL/cl_ext.h>
+ #include <CL/cl_ext_xilinx.h>
+ #include <map>
+ 
+@@ -28,7 +31,7 @@
+   std::pair<const std::string, void *>("xclGetXrtDevice", (void *)xclGetXrtDevice),
+   std::pair<const std::string, void *>("xclGetMemObjDeviceAddress", (void *)xclGetMemObjDeviceAddress),
+   std::pair<const std::string, void *>("xclGetComputeUnitInfo", (void *)xclGetComputeUnitInfo),
+-  std::pair<const std::string, void *>("clIcdGetPlatformIDsKHR", (void *)clIcdGetPlatformIDsKHR),
++  std::pair<const std::string, void *>("clIcdGetPlatformIDsKHR", (void *)api::clIcdGetPlatformIDsKHR),
+ };
+ 
+ 
+--- src/runtime_src/xocl/api/api.h	2025-04-10 18:24:43.762247236 -0400
++++ src/runtime_src/xocl/api/api.h	2025-04-11 11:35:11.476675039 -0400
+@@ -17,7 +17,6 @@
+ #ifndef xocl_api_api_h_
+ #define xocl_api_api_h_
+ 
+-#include <CL/opencl.h>
+ 
+ /**
+  * Extern declration of xocl::api function that are used
+@@ -29,6 +28,13 @@
+  * All functions in this API throw on error
+  */
+ 
++#include <ocl_icd.h>
++#include <CL/cl_ext.h>
++
++#if 0
++#include <CL/opencl.hpp>
++#endif
++
+ namespace xocl { namespace api {
+ 
+ cl_int
+@@ -73,6 +79,11 @@
+ 
+ 
+ cl_int
++clIcdGetPlatformIDsKHR(cl_uint          num_entries,
++                       cl_platform_id * platforms,
++                       cl_uint *        num_platforms);
++
++cl_int
+ clEnqueueNDRangeKernel(cl_command_queue command_queue,
+                        cl_kernel        kernel,
+                        cl_uint          work_dim,
+--- src/runtime_src/xocl/api/clGetPlatformIDs.cpp	2025-04-10 18:24:43.763247205 -0400
++++ src/runtime_src/xocl/api/clGetPlatformIDs.cpp	2025-04-11 13:42:16.991135407 -0400
+@@ -18,15 +18,16 @@
+ 
+ #include "xocl/config.h"
+ #include "xocl/core/platform.h"
+-
+ #include "detail/platform.h"
+-
+ #include "plugin/xdp/profile_v2.h"
+ 
++#include <ocl_icd.h>
++#include <CL/cl_ext.h>
++
+ namespace xocl {
+ 
+ static void
+-validOrError(cl_uint          num_entries,
++__validOrError(cl_uint          num_entries,
+              cl_platform_id * platforms,
+              cl_uint *        num_platforms)
+ {
+@@ -37,11 +38,11 @@
+ }
+ 
+ static cl_int
+-clGetPlatformIDs(cl_uint          num_entries,
++__clGetPlatformIDs(cl_uint          num_entries,
+                  cl_platform_id * platforms,
+                  cl_uint *        num_platforms)
+ {
+-  validOrError(num_entries,platforms,num_platforms);
++  __validOrError(num_entries,platforms,num_platforms);
+ 
+   auto platform = get_global_platform();
+   if (num_entries && platforms)
+@@ -58,7 +59,7 @@
+                  cl_platform_id * platforms,
+                  cl_uint *        num_platforms)
+ {
+-  return ::xocl::clGetPlatformIDs(num_entries, platforms, num_platforms);
++  return ::xocl::__clGetPlatformIDs(num_entries, platforms, num_platforms);
+ }
+ 
+ } // api
+@@ -73,7 +74,7 @@
+   try {
+     PROFILE_LOG_FUNCTION_CALL;
+     LOP_LOG_FUNCTION_CALL;
+-    return xocl::clGetPlatformIDs
++    return xocl::__clGetPlatformIDs
+       (num_entries, platforms, num_platforms);
+   }
+   catch (const xocl::error& ex) {
+@@ -86,6 +87,10 @@
+   }
+ }
+ 
++namespace xocl {
++
++namespace api {
++
+ cl_int
+ clIcdGetPlatformIDsKHR(cl_uint          num_entries,
+                        cl_platform_id * platforms,
+@@ -95,7 +100,7 @@
+     platforms[0] = nullptr;
+ 
+   try {
+-    xocl::clGetPlatformIDs
++    xocl::__clGetPlatformIDs
+       (num_entries, platforms, num_platforms);
+   }
+   catch (const xocl::error& ex) {
+@@ -115,3 +120,7 @@
+   assert(num_entries && platforms);
+   return platforms[0] ? CL_SUCCESS : CL_PLATFORM_NOT_FOUND_KHR;
+ }
++
++} // api
++
++} // xocl
+--- src/runtime_src/tools/scripts/xrtdeps.sh	2025-04-10 18:24:43.572253110 -0400
++++ src/runtime_src/tools/scripts/xrtdeps.sh	2025-04-10 21:28:42.852982953 -0400
+@@ -297,7 +297,7 @@
+      protobuf-static \
+      python \
+      python-pip \
+-     python2-sphinx \
++     python3-sphinx \
+      python3 \
+      python3-pip \
+      redhat-lsb \
+@@ -694,10 +694,7 @@
+         elif [ $MAJOR -ge 38 ]; then
+             # From version 38 onwards, a version of HIP devel tools is bundled--
+             # https://packages.fedoraproject.org/pkgs/rocclr/hip-devel/
+-            yum install -y hip-devel
+-        else
+-            echo "Manual installation of HIP is required, please follow instructions on ROCm website--"
+-            echo "https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/install-overview.html"
++            dnf install -y hip-devel
+         fi
+     else
+             echo "Manual installation of HIP is required, please follow instructions on ROCm website--"
+--- src/include/1_2/CL/cl_ext_xilinx.h	2025-04-10 18:24:43.513254934 -0400
++++ src/include/1_2/CL/cl_ext_xilinx.h	2025-04-11 13:05:06.219155003 -0400
+@@ -40,13 +40,12 @@
+ #define CL_USE_DEPRECATED_OPENCL_1_1_APIS
+ #define CL_USE_DEPRECATED_OPENCL_1_2_APIS
+ 
+-// Do *not* include cl_ext.h from this directory
+ #ifndef _WIN32
+-# include_next <CL/cl_ext.h>
++#include <CL/cl_ext_xocl.h>
+ #else
+ # pragma warning( push )
+ # pragma warning( disable : 4201 )
+-# include <../include/CL/cl_ext.h>
++# include <../include/CL/cl_ext_xocl.h>
+ #endif
+ 
+ #ifdef __cplusplus
+--- src/include/1_2/CL/cl_ext_xocl.h	2025-04-10 18:24:43.513254934 -0400
++++ src/include/1_2/CL/cl_ext_xocl.h	2025-04-11 13:09:23.636037580 -0400
+@@ -0,0 +1,42 @@
++/*******************************************************************************
++ * Copyright (c) 2008-2015 The Khronos Group Inc.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and/or associated documentation files (the
++ * "Materials"), to deal in the Materials without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Materials, and to
++ * permit persons to whom the Materials are furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Materials.
++ *
++ * MODIFICATIONS TO THIS FILE MAY MEAN IT NO LONGER ACCURATELY REFLECTS
++ * KHRONOS STANDARDS. THE UNMODIFIED, NORMATIVE VERSIONS OF KHRONOS
++ * SPECIFICATIONS AND HEADER INFORMATION ARE LOCATED AT
++ *    https://www.khronos.org/registry/
++ *
++ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
++ ******************************************************************************/
++
++/*
++ * Copyright (C) 2018, Xilinx Inc - All rights reserved
++ */
++
++#ifndef __CL_EXT_XOCL_H
++#define __CL_EXT_XOCL_H
++
++// This isn't the coolest.  If an application truly needs cl_ext.h
++// and finds this one first, then the warning is bogus.
++//#warning Deprecated Xilinx cl_ext.h included, please replace with cl_ext_xilinx.h
++#include <CL/cl_ext.h>
++#include <CL/cl_ext_xilinx.h>
++
++#endif
