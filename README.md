@@ -3,13 +3,13 @@ AMD / Xilinx xrt-202420.2.18.179
 
 This is a fork and port of Xilinx XRT Version 202420.2.18.179 to Fedora 39 `x86_64` with Linux Kernel 6.11.9. It also builds and works correctly with Linux Kernel 6.13.9 also on Fedora 39. It is based on a Github fork of the AMD / Xilinx original at [XRT Github](https://github.com/Xilinx/XRT).
 
-This port corrects a number of bugs in XRT. Most importantly, the file [src/include/1_2/CL/cl_ext.h](https://github.com/steleman/xrt-202420.2.18.179-fc39/src/include/1_2/CL/cl_ext.h) has been renamed to [src/include/1_2/CL/cl_ext_xocl.h](https://github.com/steleman/xrt-202420.2.18.179-fc39/src/include/1_2/CL/cl_ext_xocl.h). The original name created conflicts with normative public interfaces from the OpenCL Standard - namely the header file `cl_ext.h`. That, in turn, created a huge compile time mess. The mess has been cleaned up and everything compiles and builds cleanly.
+This port corrects a number of bugs in XRT. Most importantly, the file `src/include/1_2/CL/cl_ext.h`has been renamed to [src/include/1_2/CL/cl_ext_xocl.h](https://github.com/steleman/xrt-202420.2.18.179-fc39/blob/main/src/include/1_2/CL/cl_ext_xocl.h). The original name created conflicts with normative public interfaces from the OpenCL Standard - namely the header file `cl_ext.h`. That, in turn, created a huge compile time mess. The mess has been cleaned up and everything compiles and builds cleanly.
 
 There is a large number of other patches. Details are in the patch file - see below. The patch applies with `-p0` from the toplevel directory.
 
-The original README file has been renamed to [README.XRT](https://github.com/steleman/xrt-202420.2.18.179-fc39/README.XRT.rst) here.
+The original README.rst + file has been renamed to [README.XRT.rst](https://github.com/steleman/xrt-202420.2.18.179-fc39/blob/main/README.XRT.rst) here.
 
-The full set of patches can be found in the [patches-fc39](https://github.com/steleman/xrt-202420.2.18.179-fc39/patches-fc39/) directory.
+The full set of patches can be found in the [patches-fc39](https://github.com/steleman/xrt-202420.2.18.179-fc39/tree/main/patches-fc39) directory.
 
 How to configure and build:
 ----------------------------------
